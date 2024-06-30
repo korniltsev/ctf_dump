@@ -1,0 +1,8 @@
+*.bin
+*.bin.elf
+*.bin.o
+cmake-build-*/
+loader.arm64
+loader.x86
+.idea
+.gdb_history
