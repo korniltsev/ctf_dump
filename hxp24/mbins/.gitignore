@@ -1,0 +1,6 @@
+/target
+*.bin.til
+*.bin.id*
+*.bin.nam
+*.i64
+.idea
